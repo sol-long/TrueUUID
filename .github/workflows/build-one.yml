@@ -12,6 +12,10 @@ on:
         description: 'Target id from release/targets.json'
         required: true
         default: 'neoforge-1.21.1'
+      mod_version:
+        description: 'Override mod_version so the JAR is distinguishable from a released build'
+        required: true
+        default: '1.3.1-pcl'
       tag:
         description: 'Release tag to create (leave empty for build-<run_number>)'
         required: false
@@ -44,7 +48,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/ci/build-target.sh "${{ inputs.target }}"
+          # Mirrors scripts/ci/build-target.sh, but lets the caller override
+          # mod_version so the artifact can never collide with a published
+          # release that predates the PCL2 fix.
+          task=$(jq -r --arg id '${{ inputs.target }}' \
+            '.targets[] | select(.id == $id) | .build_task' release/targets.json)
+          [[ -n "$task" && "$task" != null ]] || { echo "unknown target: ${{ inputs.target }}" >&2; exit 1; }
+          ./gradlew :shared:protocol:test "$task" \
+            --no-daemon --stacktrace --configure-on-demand \
+            -Pmod_version='${{ inputs.mod_version }}'
 
       - name: Collect the JAR and checksum
         shell: bash
