@@ -1,0 +1,92 @@
+name: Build one target
+
+# Fork-only helper: build a single TrueUUID target and publish the JAR as a
+# release asset, so it can be downloaded without an authenticated API call.
+# Upstream deliberately uploads nothing; this workflow is not meant for
+# upstream.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target id from release/targets.json'
+        required: true
+        default: 'neoforge-1.21.1'
+      tag:
+        description: 'Release tag to create (leave empty for build-<run_number>)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-one-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ inputs.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install JDK 21 for the Gradle launcher and toolchain
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build the target
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/ci/build-target.sh "${{ inputs.target }}"
+
+      - name: Collect the JAR and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='${{ inputs.target }}'
+          loader=${target%%-*}
+          version=${target#*-}
+          libdir="platform/${loader}/${version}/build/libs"
+          ls -l "$libdir"
+          jar=$(find "$libdir" -maxdepth 1 -name "trueuuid-*-${target}.jar" -print -quit)
+          [[ -n "$jar" ]] || { echo "no JAR matching trueuuid-*-${target}.jar in $libdir" >&2; exit 1; }
+          mkdir -p out
+          cp "$jar" out/
+          sha256sum "out/$(basename "$jar")" | tee out/SHA256SUMS
+          # Fail the job if the PCL2 offline-session fix is not in the artifact.
+          unzip -l "$jar" | grep -q 'cn/alini/trueuuid/protocol/ClientSession.class' \
+            || { echo "ClientSession.class missing: this JAR predates the PCL2 fix" >&2; exit 1; }
+          {
+            echo "### Built $(basename "$jar")"
+            echo '```'
+            cat out/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trueuuid-${{ inputs.target }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: Publish as a release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag='${{ inputs.tag }}'
+          [[ -n "$tag" ]] || tag="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" out/* \
+            --title "TrueUUID ${{ inputs.target }} (${tag})" \
+            --notes "Built from ${GITHUB_SHA} by the fork-only single-target workflow. Includes the PCL2 offline-session fix." \
+            --latest=false
+          echo "Published: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}" >> "$GITHUB_STEP_SUMMARY"
