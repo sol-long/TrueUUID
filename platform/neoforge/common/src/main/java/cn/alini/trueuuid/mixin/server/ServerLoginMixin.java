@@ -24,7 +24,6 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.gen.Accessor;
-import org.spongepowered.asm.mixin.gen.Invoker;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -44,8 +43,6 @@ abstract class ServerLoginMixin {
     abstract MinecraftServer trueuuid$server();
     @Accessor("connection")
     abstract Connection trueuuid$connection();
-    @Invoker("verifyLoginAndFinishConnectionSetup")
-    abstract void trueuuid$finishLogin(GameProfile profile);
 
     @Unique private final LoginAttempt trueuuid$attempt = new LoginAttempt();
     @Unique private int trueuuid$transaction;
@@ -73,6 +70,14 @@ abstract class ServerLoginMixin {
                 new AuthPayload(AuthWireCodec.decodeQuery(query))));
     }
 
+    // Holds the vanilla login while the client answers, and never finalises the login itself.
+    // The finaliser (verifyLoginAndFinishConnectionSetup) is only ever reached through the vanilla
+    // tick: other login-phase mods hold the very same tick to run their own login queries (e.g.
+    // AutoModpack 5.x wraps tick() and refuses to call the original until its modpack verdict is in).
+    // Invoking the finaliser directly from this handler would jump over those holds, so the player
+    // would enter the world before the modpack check could run. Clearing the attempt returns the
+    // phase to IDLE, which lets the held tick proceed, and vanilla finalises with
+    // authenticatedProfile - the profile set by this mod.
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void trueuuid$pauseVanillaLogin(CallbackInfo callback) {
         if (!trueuuid$attempt.phase().equals(cn.alini.trueuuid.protocol.LoginStateMachine.Phase.IDLE)) {
@@ -144,7 +149,9 @@ abstract class ServerLoginMixin {
                             } else {
                                 cn.alini.trueuuid.Trueuuid.acceptance("result=offline_fallback player={}", name);
                                 AdapterRuntime.recordOfflineFallback(authenticatedProfile);
-                                trueuuid$finishLogin(authenticatedProfile);
+                                // Login finalisation is left to the vanilla VERIFYING tick (see the comment on
+                                // trueuuid$pauseVanillaLogin): the attempt is cleared below, which stops the
+                                // tick pause, and the next tick finalises with authenticatedProfile.
                             }
                             return;
                         }
@@ -158,7 +165,9 @@ abstract class ServerLoginMixin {
                         authenticatedProfile = trueuuid$profile(verified);
                         AdapterRuntime.recordVerifiedProfile(verified, ip, answer.message().customEndpoint());
                         cn.alini.trueuuid.Trueuuid.acceptance("result=premium_ready player={} uuid={}", verified.name(), verified.uuid());
-                        trueuuid$finishLogin(authenticatedProfile);
+                        // No direct finaliser call: the vanilla VERIFYING tick does it once the attempt is
+                        // cleared, so login-phase holds from other mods (e.g. AutoModpack's modpack check)
+                        // keep their turn instead of being jumped over.
                     } finally {
                         if (trueuuid$attempt.phase() != LoginStateMachine.Phase.AWAITING_MIGRATION) trueuuid$clear();
                     }
@@ -249,7 +258,7 @@ abstract class ServerLoginMixin {
                         AdapterRuntime.recordVerifiedProfile(verified,
                                 trueuuid$pendingIp == null ? ip : trueuuid$pendingIp, trueuuid$pendingEndpoint);
                         cn.alini.trueuuid.Trueuuid.acceptance("result=migration_complete player={} uuid={}", migrationName, verified.uuid());
-                        trueuuid$finishLogin(authenticatedProfile);
+                        // Same as the premium path: hand the login back to the vanilla tick.
                     } finally {
                         AdapterRuntime.clearMigrationPending(migrationName);
                         trueuuid$clear();
