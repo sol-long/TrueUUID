@@ -12,8 +12,6 @@
     "client.PauseScreenMixin"
   ],
   "mixins": [
-    "diag.AutoModpackAddonDiagMixin",
-    "diag.FabricLoginAddonDiagMixin",
     "server.ServerboundCustomQueryAnswerMixin",
     "server.ServerLoginMixin"
   ],

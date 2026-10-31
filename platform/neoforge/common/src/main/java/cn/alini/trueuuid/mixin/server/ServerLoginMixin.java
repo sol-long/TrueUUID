@@ -50,9 +50,6 @@ abstract class ServerLoginMixin {
     @Unique private PlayerDataMigration.OfflineData trueuuid$pendingOfflineData;
     @Unique private String trueuuid$pendingIp;
     @Unique private String trueuuid$pendingEndpoint;
-    @Unique private int trueuuid$diagTick;
-    @Unique private String trueuuid$lastTickSignature;
-    @Unique private int trueuuid$finalizerCalls;
     @Unique private static java.lang.reflect.Method trueuuid$fabricGetAddon;
     @Unique private static java.lang.reflect.Field trueuuid$fabricChannels;
     @Unique private static boolean trueuuid$fabricProbed;
@@ -87,31 +84,11 @@ abstract class ServerLoginMixin {
             }
             java.util.Map<?, ?> channels = (java.util.Map<?, ?>) trueuuid$fabricChannels.get(addon);
             if (channels.remove(trueuuid$transaction) != null) {
-                cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] untracked login query {} from Fabric API", trueuuid$transaction);
+                cn.alini.trueuuid.Trueuuid.debug("Untracked login query {} from Fabric API", trueuuid$transaction);
             }
         } catch (Throwable failure) {
             cn.alini.trueuuid.Trueuuid.LOGGER.warn("TrueUUID could not untrack its login query from Fabric API", failure);
         }
-    }
-
-    @Unique private String trueuuid$loginState() {
-        try {
-            java.lang.reflect.Field field = ServerLoginPacketListenerImpl.class.getDeclaredField("state");
-            field.setAccessible(true);
-            String text = String.valueOf(field.get(this));
-            return text.substring(text.lastIndexOf('.') + 1);
-        } catch (Throwable failure) {
-            return "?";
-        }
-    }
-
-    // Diagnostic only: does the vanilla finaliser ever run after the gate releases?
-    @Inject(method = "verifyLoginAndFinishConnectionSetup", at = @At("HEAD"))
-    private void trueuuid$diagFinalizer(GameProfile profile, CallbackInfo callback) {
-        if (trueuuid$finalizerCalls++ > 4) return;
-        cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] vanilla finalizer invoked #{}, profile={} ({})",
-                trueuuid$finalizerCalls, profile == null ? "null" : profile.getName(),
-                profile == null ? "null" : profile.getId());
     }
 
     // Install the authentication gate before vanilla exposes VERIFYING to the
@@ -126,7 +103,6 @@ abstract class ServerLoginMixin {
             return;
         }
         trueuuid$transaction = trueuuid$newTransaction();
-        cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] login gate armed tx={} player={}", trueuuid$transaction, profile.getName());
         byte[] query = trueuuid$attempt.begin(trueuuid$transaction, UUID.randomUUID().toString().replace("-", ""),
                 System.currentTimeMillis());
         cn.alini.trueuuid.Trueuuid.acceptance("phase=auth_query_sent player={}", profile.getName());
@@ -146,12 +122,6 @@ abstract class ServerLoginMixin {
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void trueuuid$pauseVanillaLogin(CallbackInfo callback) {
         trueuuid$untrackFabricQuery();
-        String signature = trueuuid$attempt.phase() + "|" + trueuuid$loginState();
-        if (!signature.equals(trueuuid$lastTickSignature)) {
-            trueuuid$lastTickSignature = signature;
-            cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] login tick phase={} state={}",
-                    trueuuid$attempt.phase(), trueuuid$loginState());
-        }
         if (!trueuuid$attempt.phase().equals(cn.alini.trueuuid.protocol.LoginStateMachine.Phase.IDLE)) {
             callback.cancel();
             boolean migration = trueuuid$attempt.phase() == LoginStateMachine.Phase.AWAITING_MIGRATION
@@ -172,8 +142,6 @@ abstract class ServerLoginMixin {
     @Inject(method = "handleCustomQueryPacket", at = @At("HEAD"), cancellable = true)
     private void trueuuid$verify(ServerboundCustomQueryAnswerPacket packet, CallbackInfo callback) {
         if (packet.transactionId() != trueuuid$transaction || authenticatedProfile == null) return;
-        cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] answer received tx={} phase={} payload={}", packet.transactionId(),
-                trueuuid$attempt.phase(), packet.payload() == null ? "null" : packet.payload().getClass().getSimpleName());
         callback.cancel();
         if (packet.payload() == null) {
             cn.alini.trueuuid.Trueuuid.acceptance("result=client_mod_missing player={}", authenticatedProfile.getName());
@@ -274,7 +242,6 @@ abstract class ServerLoginMixin {
         trueuuid$pendingIp = null;
         trueuuid$pendingEndpoint = null;
         trueuuid$attempt.disconnect();
-        cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] attempt cleared, phase={}", trueuuid$attempt.phase());
     }
 
     @Unique private int trueuuid$newTransaction() {
