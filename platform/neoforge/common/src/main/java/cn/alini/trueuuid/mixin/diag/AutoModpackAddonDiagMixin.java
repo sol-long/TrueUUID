@@ -59,7 +59,7 @@ public abstract class AutoModpackAddonDiagMixin {
         }
     }
 
-    private static Field field(String name) throws NoSuchFieldException {
+    private static Field field(String name) throws Exception {
         Field field = Class.forName("pl.skidam.automodpack.networking.server.ServerLoginNetworkAddon")
                 .getDeclaredField(name);
         field.setAccessible(true);
