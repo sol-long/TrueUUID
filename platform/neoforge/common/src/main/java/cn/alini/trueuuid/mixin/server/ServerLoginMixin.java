@@ -24,7 +24,6 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.gen.Accessor;
-import org.spongepowered.asm.mixin.gen.Invoker;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -44,8 +43,6 @@ abstract class ServerLoginMixin {
     abstract MinecraftServer trueuuid$server();
     @Accessor("connection")
     abstract Connection trueuuid$connection();
-    @Invoker("verifyLoginAndFinishConnectionSetup")
-    abstract void trueuuid$finishLogin(GameProfile profile);
 
     @Unique private final LoginAttempt trueuuid$attempt = new LoginAttempt();
     @Unique private int trueuuid$transaction;
@@ -53,6 +50,46 @@ abstract class ServerLoginMixin {
     @Unique private PlayerDataMigration.OfflineData trueuuid$pendingOfflineData;
     @Unique private String trueuuid$pendingIp;
     @Unique private String trueuuid$pendingEndpoint;
+    @Unique private static java.lang.reflect.Method trueuuid$fabricGetAddon;
+    @Unique private static java.lang.reflect.Field trueuuid$fabricChannels;
+    @Unique private static boolean trueuuid$fabricProbed;
+
+    // Fabric API records EVERY ClientboundCustomQueryPacket sent on the login connection as one of its
+    // own outstanding queries (PacketCallbackListener#sent -> ServerLoginNetworkAddon#registerOutgoingPacket)
+    // and only lets the vanilla finaliser run while that map is empty
+    // (@Redirect on tick's verifyLoginAndFinishConnectionSetup call). Our query is answered by this mod,
+    // so Fabric would wait for it forever and the login would never finalise. Drop our transaction id
+    // from that map; a missing Fabric API is fine.
+    @Unique private void trueuuid$untrackFabricQuery() {
+        if (trueuuid$transaction == 0) return;
+        if (!trueuuid$fabricProbed) {
+            trueuuid$fabricProbed = true;
+            try {
+                Class<?> extensions = Class.forName("net.fabricmc.fabric.impl.networking.NetworkHandlerExtensions");
+                trueuuid$fabricGetAddon = extensions.getMethod("getAddon");
+            } catch (ClassNotFoundException absent) {
+                trueuuid$fabricGetAddon = null;
+            } catch (Throwable failure) {
+                trueuuid$fabricGetAddon = null;
+                cn.alini.trueuuid.Trueuuid.LOGGER.warn("TrueUUID could not look up the Fabric API login addon", failure);
+            }
+        }
+        if (trueuuid$fabricGetAddon == null) return;
+        try {
+            Object addon = trueuuid$fabricGetAddon.invoke(this);
+            if (addon == null) return;
+            if (trueuuid$fabricChannels == null) {
+                trueuuid$fabricChannels = addon.getClass().getDeclaredField("channels");
+                trueuuid$fabricChannels.setAccessible(true);
+            }
+            java.util.Map<?, ?> channels = (java.util.Map<?, ?>) trueuuid$fabricChannels.get(addon);
+            if (channels.remove(trueuuid$transaction) != null) {
+                cn.alini.trueuuid.Trueuuid.debug("Untracked login query {} from Fabric API", trueuuid$transaction);
+            }
+        } catch (Throwable failure) {
+            cn.alini.trueuuid.Trueuuid.LOGGER.warn("TrueUUID could not untrack its login query from Fabric API", failure);
+        }
+    }
 
     // Install the authentication gate before vanilla exposes VERIFYING to the
     // server tick. Waiting for handleHello TAIL permits a native-login race.
@@ -71,10 +108,20 @@ abstract class ServerLoginMixin {
         cn.alini.trueuuid.Trueuuid.acceptance("phase=auth_query_sent player={}", profile.getName());
         connection.send(new ClientboundCustomQueryPacket(trueuuid$transaction,
                 new AuthPayload(AuthWireCodec.decodeQuery(query))));
+        trueuuid$untrackFabricQuery();
     }
 
+    // Holds the vanilla login while the client answers, and never finalises the login itself.
+    // The finaliser (verifyLoginAndFinishConnectionSetup) is only ever reached through the vanilla
+    // tick: other login-phase mods hold the very same tick to run their own login queries (e.g.
+    // AutoModpack 5.x wraps tick() and refuses to call the original until its modpack verdict is in).
+    // Invoking the finaliser directly from this handler would jump over those holds, so the player
+    // would enter the world before the modpack check could run. Clearing the attempt returns the
+    // phase to IDLE, which lets the held tick proceed, and vanilla finalises with
+    // authenticatedProfile - the profile set by this mod.
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void trueuuid$pauseVanillaLogin(CallbackInfo callback) {
+        trueuuid$untrackFabricQuery();
         if (!trueuuid$attempt.phase().equals(cn.alini.trueuuid.protocol.LoginStateMachine.Phase.IDLE)) {
             callback.cancel();
             boolean migration = trueuuid$attempt.phase() == LoginStateMachine.Phase.AWAITING_MIGRATION
@@ -144,7 +191,9 @@ abstract class ServerLoginMixin {
                             } else {
                                 cn.alini.trueuuid.Trueuuid.acceptance("result=offline_fallback player={}", name);
                                 AdapterRuntime.recordOfflineFallback(authenticatedProfile);
-                                trueuuid$finishLogin(authenticatedProfile);
+                                // Login finalisation is left to the vanilla VERIFYING tick (see the comment on
+                                // trueuuid$pauseVanillaLogin): the attempt is cleared below, which stops the
+                                // tick pause, and the next tick finalises with authenticatedProfile.
                             }
                             return;
                         }
@@ -158,7 +207,9 @@ abstract class ServerLoginMixin {
                         authenticatedProfile = trueuuid$profile(verified);
                         AdapterRuntime.recordVerifiedProfile(verified, ip, answer.message().customEndpoint());
                         cn.alini.trueuuid.Trueuuid.acceptance("result=premium_ready player={} uuid={}", verified.name(), verified.uuid());
-                        trueuuid$finishLogin(authenticatedProfile);
+                        // No direct finaliser call: the vanilla VERIFYING tick does it once the attempt is
+                        // cleared, so login-phase holds from other mods (e.g. AutoModpack's modpack check)
+                        // keep their turn instead of being jumped over.
                     } finally {
                         if (trueuuid$attempt.phase() != LoginStateMachine.Phase.AWAITING_MIGRATION) trueuuid$clear();
                     }
@@ -217,6 +268,7 @@ abstract class ServerLoginMixin {
                 verified.name(), offlineData.offlineUuid(), verified.uuid());
         trueuuid$connection().send(new ClientboundCustomQueryPacket(trueuuid$transaction,
                 new AuthPayload(AuthWireCodec.decodeQuery(wire))));
+        trueuuid$untrackFabricQuery();
     }
 
     @Unique private void trueuuid$handleMigrationAnswer(ServerboundCustomQueryAnswerPacket packet,
@@ -249,7 +301,7 @@ abstract class ServerLoginMixin {
                         AdapterRuntime.recordVerifiedProfile(verified,
                                 trueuuid$pendingIp == null ? ip : trueuuid$pendingIp, trueuuid$pendingEndpoint);
                         cn.alini.trueuuid.Trueuuid.acceptance("result=migration_complete player={} uuid={}", migrationName, verified.uuid());
-                        trueuuid$finishLogin(authenticatedProfile);
+                        // Same as the premium path: hand the login back to the vanilla tick.
                     } finally {
                         AdapterRuntime.clearMigrationPending(migrationName);
                         trueuuid$clear();
