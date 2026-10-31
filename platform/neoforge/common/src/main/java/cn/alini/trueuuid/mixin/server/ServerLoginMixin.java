@@ -53,6 +53,46 @@ abstract class ServerLoginMixin {
     @Unique private int trueuuid$diagTick;
     @Unique private String trueuuid$lastTickSignature;
     @Unique private int trueuuid$finalizerCalls;
+    @Unique private static java.lang.reflect.Method trueuuid$fabricGetAddon;
+    @Unique private static java.lang.reflect.Field trueuuid$fabricChannels;
+    @Unique private static boolean trueuuid$fabricProbed;
+
+    // Fabric API records EVERY ClientboundCustomQueryPacket sent on the login connection as one of its
+    // own outstanding queries (PacketCallbackListener#sent -> ServerLoginNetworkAddon#registerOutgoingPacket)
+    // and only lets the vanilla finaliser run while that map is empty
+    // (@Redirect on tick's verifyLoginAndFinishConnectionSetup call). Our query is answered by this mod,
+    // so Fabric would wait for it forever and the login would never finalise. Drop our transaction id
+    // from that map; a missing Fabric API is fine.
+    @Unique private void trueuuid$untrackFabricQuery() {
+        if (trueuuid$transaction == 0) return;
+        if (!trueuuid$fabricProbed) {
+            trueuuid$fabricProbed = true;
+            try {
+                Class<?> extensions = Class.forName("net.fabricmc.fabric.impl.networking.NetworkHandlerExtensions");
+                trueuuid$fabricGetAddon = extensions.getMethod("getAddon");
+            } catch (ClassNotFoundException absent) {
+                trueuuid$fabricGetAddon = null;
+            } catch (Throwable failure) {
+                trueuuid$fabricGetAddon = null;
+                cn.alini.trueuuid.Trueuuid.LOGGER.warn("TrueUUID could not look up the Fabric API login addon", failure);
+            }
+        }
+        if (trueuuid$fabricGetAddon == null) return;
+        try {
+            Object addon = trueuuid$fabricGetAddon.invoke(this);
+            if (addon == null) return;
+            if (trueuuid$fabricChannels == null) {
+                trueuuid$fabricChannels = addon.getClass().getDeclaredField("channels");
+                trueuuid$fabricChannels.setAccessible(true);
+            }
+            java.util.Map<?, ?> channels = (java.util.Map<?, ?>) trueuuid$fabricChannels.get(addon);
+            if (channels.remove(trueuuid$transaction) != null) {
+                cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] untracked login query {} from Fabric API", trueuuid$transaction);
+            }
+        } catch (Throwable failure) {
+            cn.alini.trueuuid.Trueuuid.LOGGER.warn("TrueUUID could not untrack its login query from Fabric API", failure);
+        }
+    }
 
     @Unique private String trueuuid$loginState() {
         try {
@@ -92,6 +132,7 @@ abstract class ServerLoginMixin {
         cn.alini.trueuuid.Trueuuid.acceptance("phase=auth_query_sent player={}", profile.getName());
         connection.send(new ClientboundCustomQueryPacket(trueuuid$transaction,
                 new AuthPayload(AuthWireCodec.decodeQuery(query))));
+        trueuuid$untrackFabricQuery();
     }
 
     // Holds the vanilla login while the client answers, and never finalises the login itself.
@@ -104,6 +145,7 @@ abstract class ServerLoginMixin {
     // authenticatedProfile - the profile set by this mod.
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void trueuuid$pauseVanillaLogin(CallbackInfo callback) {
+        trueuuid$untrackFabricQuery();
         String signature = trueuuid$attempt.phase() + "|" + trueuuid$loginState();
         if (!signature.equals(trueuuid$lastTickSignature)) {
             trueuuid$lastTickSignature = signature;
@@ -259,6 +301,7 @@ abstract class ServerLoginMixin {
                 verified.name(), offlineData.offlineUuid(), verified.uuid());
         trueuuid$connection().send(new ClientboundCustomQueryPacket(trueuuid$transaction,
                 new AuthPayload(AuthWireCodec.decodeQuery(wire))));
+        trueuuid$untrackFabricQuery();
     }
 
     @Unique private void trueuuid$handleMigrationAnswer(ServerboundCustomQueryAnswerPacket packet,
