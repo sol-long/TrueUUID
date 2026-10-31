@@ -51,6 +51,28 @@ abstract class ServerLoginMixin {
     @Unique private String trueuuid$pendingIp;
     @Unique private String trueuuid$pendingEndpoint;
     @Unique private int trueuuid$diagTick;
+    @Unique private String trueuuid$lastTickSignature;
+    @Unique private int trueuuid$finalizerCalls;
+
+    @Unique private String trueuuid$loginState() {
+        try {
+            java.lang.reflect.Field field = ServerLoginPacketListenerImpl.class.getDeclaredField("state");
+            field.setAccessible(true);
+            String text = String.valueOf(field.get(this));
+            return text.substring(text.lastIndexOf('.') + 1);
+        } catch (Throwable failure) {
+            return "?";
+        }
+    }
+
+    // Diagnostic only: does the vanilla finaliser ever run after the gate releases?
+    @Inject(method = "verifyLoginAndFinishConnectionSetup", at = @At("HEAD"))
+    private void trueuuid$diagFinalizer(GameProfile profile, CallbackInfo callback) {
+        if (trueuuid$finalizerCalls++ > 4) return;
+        cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] vanilla finalizer invoked #{}, profile={} ({})",
+                trueuuid$finalizerCalls, profile == null ? "null" : profile.getName(),
+                profile == null ? "null" : profile.getId());
+    }
 
     // Install the authentication gate before vanilla exposes VERIFYING to the
     // server tick. Waiting for handleHello TAIL permits a native-login race.
@@ -82,8 +104,11 @@ abstract class ServerLoginMixin {
     // authenticatedProfile - the profile set by this mod.
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void trueuuid$pauseVanillaLogin(CallbackInfo callback) {
-        if ((trueuuid$diagTick++ % 20) == 0) {
-            cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] login tick reached, phase={}", trueuuid$attempt.phase());
+        String signature = trueuuid$attempt.phase() + "|" + trueuuid$loginState();
+        if (!signature.equals(trueuuid$lastTickSignature)) {
+            trueuuid$lastTickSignature = signature;
+            cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] login tick phase={} state={}",
+                    trueuuid$attempt.phase(), trueuuid$loginState());
         }
         if (!trueuuid$attempt.phase().equals(cn.alini.trueuuid.protocol.LoginStateMachine.Phase.IDLE)) {
             callback.cancel();
