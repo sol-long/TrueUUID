@@ -50,7 +50,6 @@ abstract class ServerLoginMixin {
     @Unique private PlayerDataMigration.OfflineData trueuuid$pendingOfflineData;
     @Unique private String trueuuid$pendingIp;
     @Unique private String trueuuid$pendingEndpoint;
-    @Shadow private ServerLoginPacketListenerImpl.State state;
     @Unique private int trueuuid$diagTick;
 
     // Install the authentication gate before vanilla exposes VERIFYING to the
@@ -84,7 +83,7 @@ abstract class ServerLoginMixin {
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
     private void trueuuid$pauseVanillaLogin(CallbackInfo callback) {
         if ((trueuuid$diagTick++ % 20) == 0) {
-            cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] login tick reached, phase={} state={}", trueuuid$attempt.phase(), state);
+            cn.alini.trueuuid.Trueuuid.LOGGER.info("[diag] login tick reached, phase={}", trueuuid$attempt.phase());
         }
         if (!trueuuid$attempt.phase().equals(cn.alini.trueuuid.protocol.LoginStateMachine.Phase.IDLE)) {
             callback.cancel();
